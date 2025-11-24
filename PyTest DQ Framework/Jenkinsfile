@@ -1,0 +1,110 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Retrieve PostgreSQL credentials from Jenkins credentials store
+        POSTGRES_SECRET = credentials('jenkins-postgres-credentials')
+    }
+    
+    stages {
+        stage('Update Packages') {
+            steps {
+                script {
+                    echo 'Updating system packages...'
+                    sh 'apt-get update'
+                    sh 'apt-get install -y libpq-dev'
+                }
+            }
+        }
+        
+        stage('Install Python') {
+            steps {
+                echo 'Installing Python and pip...'
+                sh 'apt-get install -y python3 python3-pip python3-venv'
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    echo 'Creating virtual environment and installing dependencies...'
+                    sh '''
+                        python3 -m venv venv
+                        . venv/bin/activate
+                        pip install --upgrade pip
+                        pip install -r "PyTest DQ Framework/requirements.txt"
+                    '''
+                }
+            }
+        }
+        
+        stage('Run DQ Tests') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script {
+                        echo 'Running Data Quality tests...'
+                        sh '''
+                            . venv/bin/activate
+                            export PYTHONPATH=$WORKSPACE
+                            
+                            # Create html_report directory if it doesn't exist
+                            mkdir -p "PyTest DQ Framework/html_report"
+                            
+                            # Run pytest with markers and generate HTML report
+                            pytest "PyTest DQ Framework/tests" \
+                                -m "parquet_data" \
+                                --db_host="postgres" \
+                                --db_port="5432" \
+                                --db_name="mydatabase" \
+                                --db_user=$POSTGRES_SECRET_USR \
+                                --db_password=$POSTGRES_SECRET_PSW \
+                                --html="PyTest DQ Framework/html_report/report.html" \
+                                --self-contained-html
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Archive Test Report') {
+            steps {
+                script {
+                    echo 'Archiving test artifacts...'
+                    // Archive only the self-contained HTML report file (single file with CSS embedded)
+                    archiveArtifacts artifacts: 'PyTest DQ Framework/html_report/report.html', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Publish HTML Report') {
+            steps {
+                // Publish the HTML report
+                publishHTML(target: [
+                    allowMissing: false,  // Fail the pipeline if the report is missing
+                    keepAll: true,        // Keep all reports from previous runs
+                    reportDir: 'PyTest DQ Framework/html_report', // Correct directory path
+                    reportFiles: 'report.html',                          // Entry point file
+                    reportName: 'HTML Test Report'                      // Display name in Jenkins
+                ])
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline execution completed.'
+            // Clean up workspace if needed
+            cleanWs(
+                deleteDirs: true,
+                notFailBuild: true,
+                patterns: [[pattern: 'venv/**', type: 'INCLUDE']]
+            )
+        }
+        success {
+            echo 'DQ Framework pipeline executed successfully!'
+        }
+        failure {
+            echo 'DQ Framework pipeline failed. Please check the logs and test report for details.'
+        }
+    }
+}
